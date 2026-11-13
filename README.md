@@ -8,13 +8,19 @@ Claude can keep working with the lid closed. **This works plugged in or on batte
 
 ## Install
 
-Paste this into Terminal:
+With [Homebrew](https://brew.sh):
+
+```bash
+brew install jeevithreddyofficial/tap/cw
+```
+
+Or without Homebrew:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jeevithreddyofficial/claude-awake/main/install.sh | bash
 ```
 
-It may ask for your Mac password. You also need Claude Code installed
+You also need Claude Code installed
 (`curl -fsSL https://claude.ai/install.sh | bash`).
 
 ## Commands
@@ -47,5 +53,6 @@ password when you run `cw-on` or `cw-off`. Nothing is stored or sent anywhere.
 
 ```bash
 cw-off
-sudo rm /usr/local/bin/cw /usr/local/bin/cw-on /usr/local/bin/cw-off
+brew uninstall cw                      # if installed with Homebrew
+sudo rm /usr/local/bin/cw /usr/local/bin/cw-on /usr/local/bin/cw-off   # if installed with the script
 ```
