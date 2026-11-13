@@ -8,9 +8,14 @@
 #
 # Works plugged in or on battery. Stay-awake turns OFF automatically when you
 # quit Claude, close the Terminal window, or the battery drops below 10%.
+#
+#   cw --setup     one-time: stop cw-on/cw-off asking for your password
+#   cw --unsetup   undo that
 
 MIN_BATTERY="${CW_MIN_BATTERY:-10}"   # percent
-STATE_DIR="/var/run/cw"               # one file per running cw-on (root-owned)
+STATE_DIR="${TMPDIR:-/tmp}/cw-$(id -u)"   # one file per running cw-on
+SUDOERS_FILE="/etc/sudoers.d/cw"
+PMSET="${CW_PMSET:-/usr/bin/pmset}"   # override only for testing
 
 case "$0" in
   /*) SELF="$0" ;;
@@ -18,34 +23,42 @@ case "$0" in
 esac
 
 battery_pct() {   # prints battery % if running on battery, nothing if plugged in
-  b=$(pmset -g batt)
+  b=$("$PMSET" -g batt)
   if echo "$b" | grep -q "Battery Power"; then
     echo "$b" | grep -o "[0-9]*%" | head -1 | tr -d "%"
   fi
 }
 
-# ---- guard: runs as root; keeps sleep disabled while its cw-on session lives ----
+# Change the sleep setting. Uses the passwordless rule from `cw --setup` if it
+# exists; otherwise falls back to asking for the password (when interactive).
+set_sleep_disabled() {   # $1 = 1 (stay awake) or 0 (normal)
+  sudo -n "$PMSET" -a disablesleep "$1" 2>/dev/null && return 0
+  if [ -t 0 ] && sudo "$PMSET" -a disablesleep "$1"; then return 0; fi
+  echo "cw: couldn't change the sleep setting. Run 'cw --setup' once, then try again." >&2
+  return 1
+}
+
+passwordless() { sudo -n "$PMSET" -a disablesleep 1 >/dev/null 2>&1 || return 1; }
+
+# ---- guard: runs in the background as you; keeps sleep off while cw-on lives ----
 guard() {
   id="$1"; watch="$2"
   mkdir -p "$STATE_DIR"
   echo "$$" > "$STATE_DIR/$id"
-  pmset -a disablesleep 1          # -a = both on battery and plugged in
   cleanup() {
     rm -f "$STATE_DIR/$id"
     # Only turn sleep back on when no other cw-on session is still running.
-    if [ -z "$(ls -A "$STATE_DIR" 2>/dev/null)" ]; then
-      pmset -a disablesleep 0
-    fi
+    [ "$(live_sessions)" -eq 0 ] && sudo -n "$PMSET" -a disablesleep 0
   }
   trap cleanup EXIT
-  trap 'exit' INT TERM HUP
+  trap 'exit' TERM HUP
   n=0
   while [ -f "$STATE_DIR/$id" ] && kill -0 "$watch" 2>/dev/null; do
     if [ $((n % 15)) -eq 0 ]; then              # battery check every ~30s
       pct=$(battery_pct)
       if [ -n "$pct" ] && [ "$pct" -lt "$MIN_BATTERY" ]; then
         rm -rf "$STATE_DIR"                     # end every session
-        pmset -a disablesleep 0
+        sudo -n "$PMSET" -a disablesleep 0
         osascript -e "display notification \"Battery at ${pct}% - stay-awake turned OFF\" with title \"cw\"" 2>/dev/null
         exit
       fi
@@ -55,12 +68,41 @@ guard() {
   done
 }
 
+live_sessions() {   # how many cw-on guards are actually still running
+  n=0
+  for f in "$STATE_DIR"/*; do
+    [ -f "$f" ] && kill -0 "$(cat "$f" 2>/dev/null)" 2>/dev/null && n=$((n + 1))
+  done
+  echo "$n"
+}
+
 status() {
-  if pmset -g | grep -q 'SleepDisabled[[:space:]]*1'; then
-    echo "cw: ON  (Mac will stay awake, even with the lid closed)"
+  if "$PMSET" -g | grep -q 'SleepDisabled[[:space:]]*1'; then
+    if [ "$(live_sessions)" -gt 0 ]; then
+      echo "cw: ON  (Mac will stay awake, even with the lid closed)"
+    else
+      echo "cw: ON, but no cw-on session is running (left over)."
+      echo "    Run cw-off to restore normal sleep."
+    fi
   else
     echo "cw: OFF (normal sleep)"
   fi
+}
+
+setup() {
+  need_mac
+  user="$(id -un)"
+  tmp="$(mktemp)"
+  printf '# Added by cw: lets %s turn sleep on/off without a password.\n%s ALL=(root) NOPASSWD: %s -a disablesleep 0, %s -a disablesleep 1\n' \
+    "$user" "$user" /usr/bin/pmset /usr/bin/pmset > "$tmp"
+  /usr/sbin/visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; echo "Setup failed (bad sudoers rule)."; exit 1; }
+  echo "cw: your Mac password is needed one last time."
+  sudo install -m 440 -o root -g wheel "$tmp" "$SUDOERS_FILE" && rm -f "$tmp" \
+    && echo "Done. cw-on and cw-off won't ask for your password anymore."
+}
+
+unsetup() {
+  sudo rm -f "$SUDOERS_FILE" && echo "Removed. cw-on and cw-off will ask for your password again."
 }
 
 need_mac() {
@@ -69,8 +111,8 @@ need_mac() {
 
 turn_off() {
   need_mac
-  sudo rm -rf "$STATE_DIR"
-  sudo pmset -a disablesleep 0
+  rm -rf "$STATE_DIR"
+  set_sleep_disabled 0
   status
 }
 
@@ -88,9 +130,12 @@ turn_on() {
     exit 1
   fi
 
-  echo "cw: your Mac password is needed to change sleep settings."
-  sudo -v || { echo "Cancelled."; exit 1; }
-  sudo "$SELF" __guard "session-$$" "$$" >/dev/null 2>&1 &
+  if ! passwordless; then
+    echo "cw: one-time setup so cw never asks for your password again."
+    setup || exit 1
+    passwordless || { echo "Couldn't turn stay-awake on."; exit 1; }
+  fi
+  "$SELF" __guard "session-$$" "$$" >/dev/null 2>&1 &
   sleep 1
   status
   echo "You can close the lid now. Don't put the Mac in a bag while it's on."
@@ -109,11 +154,16 @@ turn_on() {
 
   echo
   echo "Claude exited — turning stay-awake off..."
+  # Don't rely only on the background guard: stop it and restore sleep here too
+  # (unless another cw-on session is still running).
+  rm -f "$STATE_DIR/session-$$"
+  sleep 3
+  [ "$(live_sessions)" -eq 0 ] && set_sleep_disabled 0
+  status
 }
 
 # ---- dispatch ----
 if [ "$1" = "__guard" ]; then
-  [ "$(id -u)" -eq 0 ] || exit 1
   guard "$2" "$3"; exit
 fi
 
@@ -122,7 +172,9 @@ case "$(basename "$0")" in
   cw-off) turn_off ;;
   *)
     case "$1" in
-      -h|--help) sed -n '2,10p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+      -h|--help) sed -n '2,13p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+      --setup)   setup ;;
+      --unsetup) unsetup ;;
       *) need_mac; status ;;
     esac ;;
 esac

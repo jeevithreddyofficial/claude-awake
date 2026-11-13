@@ -39,10 +39,13 @@ You don't have to remember to run `cw-off`. Stay-awake switches **OFF** on its o
 - you close the Terminal window, **or**
 - you're unplugged and the battery drops below **10%**. You'll get a notification.
 
-## Why does it ask for my password?
+## Why does it ask for my password (only once)?
 
-Changing whether a Mac is allowed to sleep is an admin setting, so macOS asks for your
-password when you run `cw-on` or `cw-off`. Nothing is stored or sent anywhere.
+Changing whether a Mac is allowed to sleep is an admin setting. The first time you run
+`cw-on` (or `cw --setup`), cw asks for your password once and adds a small rule in
+`/etc/sudoers.d/cw`. The rule lets your account run exactly two commands without a
+password: `pmset -a disablesleep 1` and `pmset -a disablesleep 0`. Nothing else is allowed
+and nothing is stored or sent anywhere. Run `cw --unsetup` to remove the rule.
 
 ## Tips
 
@@ -53,6 +56,7 @@ password when you run `cw-on` or `cw-off`. Nothing is stored or sent anywhere.
 
 ```bash
 cw-off
+cw --unsetup                           # removes the no-password rule
 brew uninstall cw                      # if installed with Homebrew
 sudo rm /usr/local/bin/cw /usr/local/bin/cw-on /usr/local/bin/cw-off   # if installed with the script
 ```
